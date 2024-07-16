@@ -11,6 +11,7 @@ try:
 except ImportError:
     import urllib.parse as urlparse
 import requests
+import socket
 
 TIMEOUT = 5
 
@@ -32,6 +33,17 @@ RES_PROXY_DETECTION = '200'
 RES_AUTH_PENDING = '201'
 RES_INTERNAL_ERROR = '255'
 
+
+#https://stackoverflow.com/questions/64845431
+class HTTPAdapterWithSocketOptions(requests.adapters.HTTPAdapter):
+    def __init__(self, *args, **kwargs):
+        self.socket_options = kwargs.pop("socket_options", None)
+        super(HTTPAdapterWithSocketOptions, self).__init__(*args, **kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        if self.socket_options is not None:
+            kwargs["socket_options"] = self.socket_options
+        super(HTTPAdapterWithSocketOptions, self).init_poolmanager(*args, **kwargs)
 
 def parse_wispr(r):
     m = re.search(
@@ -66,7 +78,13 @@ def load_logout_url():
         return None
 
 
-def do_wispr_login(r, username, password):
+def do_wispr_login(r, username, password,interface):
+    session = requests.session()
+    adapter = None
+    if interface:
+        adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode('utf-8'))])
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
     data = parse_wispr(r)
     while data['MessageType'] == MSG_PROXY and \
             data['ResponseCode'] == RES_SUCCESS:
@@ -74,7 +92,7 @@ def do_wispr_login(r, username, password):
         print('Following proxy redirect with %d seconds delay' % delay)
         if delay:
             time.sleep(delay)
-        r = requests.get(data.get('NextURL', r.url), verify=False)
+        r = session.get(data.get('NextURL', r.url), verify=False)
         data = parse_wispr(r)
 
     assert data['MessageType'] == MSG_REDIRECT and \
@@ -92,7 +110,7 @@ def do_wispr_login(r, username, password):
         form['OriginatingServer'] = 'http://www.google.com'
 
     print('Submitting credentials to %s' % data['LoginURL'])
-    r = requests.post(data['LoginURL'], data=form, allow_redirects=False, verify=False)
+    r = session.post(data['LoginURL'], data=form, allow_redirects=False, verify=False)
     data = parse_wispr(r)
     assert data['MessageType'] == MSG_AUTHENTICATION
     if data.get('ReplyMessage'):
@@ -106,7 +124,7 @@ def do_wispr_login(r, username, password):
                 (login_results_url, delay))
         if delay:
             time.sleep(delay)
-        r = requests.get(login_results_url, allow_redirects=False, verify=False)
+        r = session.get(login_results_url, allow_redirects=False, verify=False)
         data = parse_wispr(r)
         if data.get('ReplyMessage'):
             print('Server says: %s' % data['ReplyMessage'])
@@ -123,9 +141,15 @@ def do_wispr_login(r, username, password):
         print(data)
 
 
-def detect():
+def detect(interface=None):
+    session = requests.session()
+    adapter = None
+    if interface:
+        adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode('utf-8'))])
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
     try:
-        r = requests.get('http://www.google.com', allow_redirects=False, verify=False, timeout=TIMEOUT)
+        r = session.get('http://www.google.com', allow_redirects=False, verify=False, timeout=TIMEOUT)
     except requests.exceptions.ConnectionError as e:
         print('Error testing for network. Perhaps you are not connected to a network?',
                 file=sys.stderr)
@@ -134,7 +158,7 @@ def detect():
         if 'WISPAccessGatewayParam' in r.text:
             break
         else:
-            r = requests.get(r.headers['Location'], allow_redirects=False, verify=False, timeout=TIMEOUT)
+            r = session.get(r.headers['Location'], allow_redirects=False, verify=False, timeout=TIMEOUT)
     if 'WISPAccessGatewayParam' not in r.text:
         if 'google' in urlparse.urlparse(r.url).hostname:
             print('Already online, no WISPr detection possible')
@@ -151,9 +175,15 @@ def detect():
     return True
 
 
-def wispr_login(username, password):
+def wispr_login(username, password, interface):
+    session = requests.session()
+    adapter = None
+    if interface:
+        adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode('utf-8'))])
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
     try:
-        r = requests.get('http://www.google.com', allow_redirects=False, verify=False, timeout=TIMEOUT)
+        r = session.get('http://www.google.com', allow_redirects=False, verify=False, timeout=TIMEOUT)
     except requests.exceptions.ConnectionError as e:
         print('Error testing for network. Perhaps you are not connected to a network?',
                 file=sys.stderr)
@@ -162,9 +192,9 @@ def wispr_login(username, password):
         if 'WISPAccessGatewayParam' in r.text:
             break
         else:
-            r = requests.get(r.headers['Location'], allow_redirects=False, verify=False, timeout=TIMEOUT)
+            r = session.get(r.headers['Location'], allow_redirects=False, verify=False, timeout=TIMEOUT)
     if 'WISPAccessGatewayParam' in r.text:
-        return do_wispr_login(r, username, password)
+        return do_wispr_login(r, username, password,interface=interface)
     host = urlparse.urlparse(r.url).hostname
     if 'google' in host:
         print('Already online, aborting')
@@ -174,12 +204,18 @@ def wispr_login(username, password):
         return False
 
 
-def wispr_logout():
+def wispr_logout(interface=None):
+    session = requests.session()
+    adapter = None
+    if interface:
+        adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode('utf-8'))])
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
     logoff_url = load_logout_url()
     if not logoff_url:
         print('No logoff URL known, can not log off', file=sys.stderr)
         return False
-    r = requests.get(logoff_url, allow_redirects=False, verify=False)
+    r = session.get(logoff_url, allow_redirects=False, verify=False)
     if r.status_code not in [200, 302]:
         print('Illegal response to logoff request: %d' % r.status_code,
                 file=sys.stderr)
@@ -210,6 +246,7 @@ def main():
             help='Log off')
     parser.add_argument('-D', '--detect', default=False, action='store_true',
             help='Only detect WISPr support')
+    parser.add_argument("-i", '--interface' , default=None,type=str,help="Use Interface")
     options = parser.parse_args()
     if not (options.detect or options.logout or options.password):
         print('You must provide a username and password', file=sys.stderr)
@@ -217,11 +254,11 @@ def main():
 
     try:
         if options.detect:
-            return detect()
+            return detect(interface=options.interface)
         elif options.logout:
-            wispr_logout()
+            wispr_logout(interface=options.interface)
         else:
-            return wispr_login(options.username, options.password)
+            return wispr_login(options.username, options.password, interface=options.interface)
     except requests.exceptions.ConnectionError as e:
         print('Error connecting to server: %s' % e, file=sys.stderr)
     except KeyboardInterrupt:
